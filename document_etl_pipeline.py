@@ -17,7 +17,8 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import List, Set, Optional, Iterator
-from concurrent.futures import ProcessPoolExecutor, as_completed
+# 메모리 누수 방지를 위해 multiprocessing Pool 사용
+import multiprocessing
 from tqdm import tqdm
 
 from docling.document_converter import DocumentConverter, PdfFormatOption
@@ -113,6 +114,16 @@ class RecursiveScanner(IFileScanner):
 # 워커 프로세스별 전역 캐시
 _worker_converter = None
 
+def _init_worker():
+    """워커 프로세스 초기화 시 엔진 로드 방지 (지연 로딩 활용)"""
+    global _worker_converter
+    _worker_converter = None
+
+def _process_route(args):
+    """multiprocessing.Pool에서 호출하기 위한 최상위 경로 함수"""
+    fpath, input_dir, output_dir, allowed_formats = args
+    return DocumentETL._global_process_single(fpath, input_dir, output_dir, allowed_formats)
+
 class DocumentETL:
     """문서 추출 및 변환 코어 엔진"""
     def __init__(self, config: ETLConfig, scanner: IFileScanner):
@@ -122,7 +133,8 @@ class DocumentETL:
         self.cfg.output_dir.mkdir(parents=True, exist_ok=True)
         logger.info(f"ETL 파이프라인 로드 완료 (Workers: {self.cfg.max_workers})")
 
-    def _build_engine(self) -> DocumentConverter:
+    @staticmethod
+    def _build_engine_static(allowed_formats) -> DocumentConverter:
         # 초기화
         ocr_opts = EasyOcrOptions(lang=["ko", "en"])
         pdf_opts = PdfPipelineOptions()
@@ -132,29 +144,33 @@ class DocumentETL:
         
         # 옵션 명시적 매핑 (Dictionary)
         return DocumentConverter(
-            allowed_formats=self.cfg.allowed_formats,
+            allowed_formats=allowed_formats,
             format_options={
                 InputFormat.PDF: PdfFormatOption(pipeline_options=pdf_opts)
             }
         )
 
-    def _process_single(self, fpath: Path) -> Optional[Path]:
+    @staticmethod
+    def _global_process_single(fpath: Path, input_dir: Path, output_dir: Path, allowed_formats) -> Optional[Path]:
         global _worker_converter
         start_t = time.time()
         size_mb = fpath.stat().st_size / (1024 * 1024)
 
         try:
+            # [기능 추가] 이어하기 체크 로직
+            rel_path = fpath.relative_to(input_dir)
+            out_path = output_dir / rel_path.with_suffix('.md')
+            
+            if out_path.exists():
+                return out_path
+
             # 개별 워커 프로세스에서 엔진 최초 1회 로드
             if _worker_converter is None:
-                _worker_converter = self._build_engine()
+                _worker_converter = DocumentETL._build_engine_static(allowed_formats)
 
             logger.debug(f"처리 시작: {fpath.name}")
             res = _worker_converter.convert(fpath)
             md_text = res.document.export_to_markdown()
-            
-            # I/O 디렉토리 구조 매핑
-            rel_path = fpath.relative_to(self.cfg.input_dir)
-            out_path = self.cfg.output_dir / rel_path.with_suffix('.md')
             
             out_path.parent.mkdir(parents=True, exist_ok=True)
             out_path.write_text(md_text, encoding="utf-8")
@@ -180,11 +196,21 @@ class DocumentETL:
         start_t = time.time()
         success_cnt = 0
 
-        # ProcessPool -> ThreadPool
-        with ProcessPoolExecutor(max_workers=self.cfg.max_workers) as pool:
-            futures = {pool.submit(self._process_single, f): f for f in targets}
-            for fut in tqdm(as_completed(futures), total=len(targets), desc="ETL Progress"):
-                if fut.result():
+        # Memory Leak 방지를 위해 maxtasksperchild 설정 적용
+        # 각 프로세스는 50개 파일 처리 후 자동 종료 및 재생성되어 메모리를 반환함
+        task_args = [
+            (f, self.cfg.input_dir, self.cfg.output_dir, self.cfg.allowed_formats) 
+            for f in targets
+        ]
+
+        with multiprocessing.Pool(
+            processes=self.cfg.max_workers,
+            initializer=_init_worker,
+            maxtasksperchild=50
+        ) as pool:
+            # imap_unordered를 사용하여 실시간 프로그레스 바 연동
+            for result in tqdm(pool.imap_unordered(_process_route, task_args), total=len(targets), desc="ETL Progress"):
+                if result:
                     success_cnt += 1
 
         total_t = time.time() - start_t
