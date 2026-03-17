@@ -17,7 +17,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import List, Set, Optional, Iterator
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from tqdm import tqdm
 
 from docling.document_converter import DocumentConverter, PdfFormatOption
@@ -45,7 +45,7 @@ class ETLConfig:
     input_dir: Path
     output_dir: Path
     # VRAM/RAM OOM 방지
-    max_workers: int = 4 
+    max_workers: int = 6
     target_exts: Set[str] = field(default_factory=lambda: {'.pdf', '.docx', '.pptx', '.xlsx'})
     skip_exts: Set[str] = field(default_factory=lambda: {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'})
     allowed_formats: List[InputFormat] = field(
@@ -110,12 +110,15 @@ class RecursiveScanner(IFileScanner):
             elif ext in self.cfg.skip_exts:
                 pass
 
+# 워커 프로세스별로 엔진을 독립 관리하기 위한 전역 캐시
+_worker_converter = None
+
 class DocumentETL:
     """문서 추출 및 변환 코어 엔진"""
     def __init__(self, config: ETLConfig, scanner: IFileScanner):
         self.cfg = config
         self.scanner = scanner
-        self.converter = self._build_engine()
+        # 메인 프로세스에서는 엔진을 로드하지 않음 (메모리 절약)
         self.cfg.output_dir.mkdir(parents=True, exist_ok=True)
         logger.info(f"ETL 파이프라인 로드 완료 (Workers: {self.cfg.max_workers})")
 
@@ -136,12 +139,17 @@ class DocumentETL:
         )
 
     def _process_single(self, fpath: Path) -> Optional[Path]:
+        global _worker_converter
         start_t = time.time()
         size_mb = fpath.stat().st_size / (1024 * 1024)
 
         try:
+            # 개별 워커 프로세스에서 엔진 최초 1회 로드
+            if _worker_converter is None:
+                _worker_converter = self._build_engine()
+
             logger.debug(f"처리 시작: {fpath.name}")
-            res = self.converter.convert(fpath)
+            res = _worker_converter.convert(fpath)
             md_text = res.document.export_to_markdown()
             
             # I/O 디렉토리 구조 매핑
@@ -173,7 +181,7 @@ class DocumentETL:
         success_cnt = 0
 
         # ProcessPool -> ThreadPool
-        with ThreadPoolExecutor(max_workers=self.cfg.max_workers) as pool:
+        with ProcessPoolExecutor(max_workers=self.cfg.max_workers) as pool:
             futures = {pool.submit(self._process_single, f): f for f in targets}
             for fut in tqdm(as_completed(futures), total=len(targets), desc="ETL Progress"):
                 if fut.result():
