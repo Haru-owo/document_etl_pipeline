@@ -60,18 +60,21 @@ class RecursiveScanner(IFileScanner):
         self.cfg = config
 
     def get_targets(self) -> Iterator[Path]:
-        # 디렉토리 재귀 스캔 (Generator )
         if not self.cfg.input_dir.exists():
             raise FileNotFoundError(f"경로 없음: {self.cfg.input_dir}")
             
         for f in self.cfg.input_dir.rglob('*'):
             if not f.is_file():
                 continue
+                
+            # OS 임시 파일 및 숨김 파일 스킵
+            if f.name.startswith('~$') or f.name.startswith('.'):
+                continue
+
             ext = f.suffix.lower()
             if ext in self.cfg.target_exts:
                 yield f
             elif ext in self.cfg.skip_exts:
-                # 이미지 파일 스킵
                 pass
 
 class DocumentETL:
@@ -104,6 +107,7 @@ class DocumentETL:
         size_mb = fpath.stat().st_size / (1024 * 1024)
 
         try:
+            print(f"지금 읽고 있는 파일: {fpath.name}")
             res = self.converter.convert(fpath)
             md_text = res.document.export_to_markdown()
             
