@@ -1,0 +1,151 @@
+"""
+Project: Data RAG System
+Module: Document ETL Pipeline
+Description: 
+    - 하이브리드 문서(PDF, DOCX, PPTX, XLSX)의 구조적 추출 및 마크다운 변환
+    - 재귀적 디렉토리 스캔 및 계층 구조 보존 적재
+    - 다국어(KO, EN) OCR 및 시각적 레이아웃 분석 지원
+Author: H4RU
+Date: 2026-03-17
+"""
+
+import os
+import time
+import logging
+from abc import ABC, abstractmethod
+from pathlib import Path
+from dataclasses import dataclass, field
+from typing import List, Set, Optional, Iterator
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from tqdm import tqdm
+
+from docling.document_converter import DocumentConverter, PdfPipelineOptions
+from docling.datamodel.pipeline_options import EasyOcrOptions
+from docling.datamodel.base_models import InputFormat
+
+# 전역 로거 세팅
+logger = logging.getLogger("RAG_ETL")
+logger.setLevel(logging.INFO)
+fmt = logging.Formatter('[%(levelname)s] %(asctime)s - %(message)s', '%H:%M:%S')
+ch = logging.StreamHandler()
+ch.setFormatter(fmt)
+logger.addHandler(ch)
+
+class DocProcessingError(Exception):
+    """문서 변환 실패 예외"""
+    pass
+
+@dataclass(frozen=True)
+class ETLConfig:
+    # 파이프라인 불변 설정
+    input_dir: Path
+    output_dir: Path
+    max_workers: int = field(default_factory=lambda: os.cpu_count() or 4)
+    target_exts: Set[str] = field(default_factory=lambda: {'.pdf', '.docx', '.pptx', '.xlsx'})
+    skip_exts: Set[str] = field(default_factory=lambda: {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'})
+    allowed_formats: List[InputFormat] = field(
+        default_factory=lambda: [InputFormat.PDF, InputFormat.DOCX, InputFormat.PPTX, InputFormat.XLSX]
+    )
+
+class IFileScanner(ABC):
+    """스캐너 인터페이스"""
+    @abstractmethod
+    def get_targets(self) -> Iterator[Path]:
+        pass
+
+class RecursiveScanner(IFileScanner):
+    def __init__(self, config: ETLConfig):
+        self.cfg = config
+
+    def get_targets(self) -> Iterator[Path]:
+        # 타겟 디렉토리 재귀적 스캔 (Generator 활용)
+        if not self.cfg.input_dir.exists():
+            raise FileNotFoundError(f"경로 없음: {self.cfg.input_dir}")
+            
+        for f in self.cfg.input_dir.rglob('*'):
+            if not f.is_file():
+                continue
+            ext = f.suffix.lower()
+            if ext in self.cfg.target_exts:
+                yield f
+            elif ext in self.cfg.skip_exts:
+                # 이미지 파일 스킵
+                pass
+
+class DocumentETL:
+    """멀티모달 문서 추출 및 변환 코어 엔진"""
+    def __init__(self, config: ETLConfig, scanner: IFileScanner):
+        self.cfg = config
+        self.scanner = scanner
+        self.converter = self._build_engine()
+        self.cfg.output_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"ETL 파이프라인 로드 완료 (Workers: {self.cfg.max_workers})")
+
+    def _build_engine(self) -> DocumentConverter:
+        # OCR 및 레이아웃 분석 엔진 초기화
+        ocr_opts = EasyOcrOptions(lang=["ko", "en"])
+        pdf_opts = PdfPipelineOptions()
+        pdf_opts.do_ocr = True
+        pdf_opts.ocr_options = ocr_opts
+        pdf_opts.do_table_structure = True
+        
+        return DocumentConverter(
+            allowed_formats=self.cfg.allowed_formats,
+            pipeline_options=pdf_opts
+        )
+
+    def _process_single(self, fpath: Path) -> Optional[Path]:
+        start_t = time.time()
+        size_mb = fpath.stat().st_size / (1024 * 1024)
+
+        try:
+            res = self.converter.convert(fpath)
+            md_text = res.document.export_to_markdown()
+            
+            # I/O 디렉토리 구조 매핑
+            rel_path = fpath.relative_to(self.cfg.input_dir)
+            out_path = self.cfg.output_dir / rel_path.with_suffix('.md')
+            
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(md_text, encoding="utf-8")
+            
+            elapsed = time.time() - start_t
+            speed = size_mb / elapsed if elapsed > 0 else 0
+            
+            logger.debug(f"파싱 성공: {fpath.name} ({elapsed:.2f}s, {speed:.2f} mb/s)")
+            return out_path
+            
+        except Exception as e:
+            logger.error(f"파싱 실패 [{fpath.name}]: {e}")
+            return None
+
+    def execute(self) -> None:
+        targets = list(self.scanner.get_targets())
+        if not targets:
+            logger.warning("처리 대상 없음")
+            return
+
+        logger.info(f"배치 실행: 총 {len(targets)}건")
+        start_t = time.time()
+        success_cnt = 0
+
+        # CPU 바운드 병렬 처리
+        with ProcessPoolExecutor(max_workers=self.cfg.max_workers) as pool:
+            futures = {pool.submit(self._process_single, f): f for f in targets}
+            for fut in tqdm(as_completed(futures), total=len(targets), desc="ETL Progress"):
+                if fut.result():
+                    success_cnt += 1
+
+        total_t = time.time() - start_t
+        logger.info(f"배치 완료: {success_cnt}/{len(targets)} 성공 (총 {total_t:.1f}s)")
+
+if __name__ == "__main__":
+    # 설정 및 의존성 주입 (Dependency Injection)
+    cfg = ETLConfig(
+        input_dir=Path("./자료"),
+        output_dir=Path("./processed_md")
+    )
+    scanner = RecursiveScanner(config=cfg)
+    etl = DocumentETL(config=cfg, scanner=scanner)
+    
+    etl.execute()
