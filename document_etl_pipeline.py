@@ -73,7 +73,7 @@ class RecursiveScanner(IFileScanner):
                 pass
 
 class DocumentETL:
-    """멀티모달 문서 추출 및 변환 코어 엔진"""
+    """문서 추출 및 변환 코어 엔진"""
     def __init__(self, config: ETLConfig, scanner: IFileScanner):
         self.cfg = config
         self.scanner = scanner
