@@ -45,7 +45,7 @@ class ETLConfig:
     input_dir: Path
     output_dir: Path
     # VRAM/RAM OOM 방지
-    max_workers: int = 6
+    max_workers: int = 4
     target_exts: Set[str] = field(default_factory=lambda: {'.pdf', '.docx', '.pptx', '.xlsx'})
     skip_exts: Set[str] = field(default_factory=lambda: {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'})
     allowed_formats: List[InputFormat] = field(
@@ -110,7 +110,7 @@ class RecursiveScanner(IFileScanner):
             elif ext in self.cfg.skip_exts:
                 pass
 
-# 워커 프로세스별로 엔진을 독립 관리하기 위한 전역 캐시
+# 워커 프로세스별 전역 캐시
 _worker_converter = None
 
 class DocumentETL:
