@@ -24,6 +24,7 @@ from docling.datamodel.pipeline_options import PdfPipelineOptions, EasyOcrOption
 from docling.datamodel.base_models import InputFormat
 
 import traceback
+import zipfile
 
 # 전역 로거 세팅
 logger = logging.getLogger("RAG_ETL")
@@ -48,6 +49,36 @@ class ETLConfig:
     allowed_formats: List[InputFormat] = field(
         default_factory=lambda: [InputFormat.PDF, InputFormat.DOCX, InputFormat.PPTX, InputFormat.XLSX]
     )
+
+class ArchivePreprocessor:
+    """ZIP 파일 탐색 및 자동 압축 해제"""
+    def __init__(self, target_dir: Path):
+        self.target_dir = target_dir
+
+    def run(self) -> None:
+        zip_files = list(self.target_dir.rglob('*.zip'))
+        if not zip_files:
+            return
+            
+        logger.info(f"ZIP Archive 발견: {len(zip_files)}ea. Extract 시작")
+        
+        for zf in zip_files:
+            if not zf.is_file():
+                continue
+                
+            extract_dir = zf.with_suffix('') 
+            
+            if extract_dir.exists():
+                continue
+                
+            try:
+                with zipfile.ZipFile(zf, 'r') as zip_ref:
+                    zip_ref.extractall(extract_dir)
+                logger.debug(f"Unzip 성공: {zf.name}")
+            except zipfile.BadZipFile:
+                logger.error(f"ZIP file 손상: {zf.name}")
+            except Exception as e:
+                logger.error(f"Unzip 에러 [{zf.name}]: {e}")
 
 class IFileScanner(ABC):
     """스캐너 인터페이스"""
@@ -155,6 +186,10 @@ if __name__ == "__main__":
         input_dir=Path("./자료"),
         output_dir=Path("./processed_md")
     )
+
+    preprocessor = ArchivePreprocessor(target_dir=cfg.input_dir)
+    preprocessor.run()
+
     scanner = RecursiveScanner(config=cfg)
     etl = DocumentETL(config=cfg, scanner=scanner)
     
