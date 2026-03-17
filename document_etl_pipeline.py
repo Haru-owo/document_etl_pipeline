@@ -19,8 +19,8 @@ from typing import List, Set, Optional, Iterator
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from tqdm import tqdm
 
-from docling.document_converter import DocumentConverter, PdfPipelineOptions
-from docling.datamodel.pipeline_options import EasyOcrOptions
+from docling.document_converter import DocumentConverter, PdfFormatOption
+from docling.datamodel.pipeline_options import PdfPipelineOptions, EasyOcrOptions
 from docling.datamodel.base_models import InputFormat
 
 # 전역 로거 세팅
@@ -58,7 +58,7 @@ class RecursiveScanner(IFileScanner):
         self.cfg = config
 
     def get_targets(self) -> Iterator[Path]:
-        # 타겟 디렉토리 재귀적 스캔 (Generator 활용)
+        # 디렉토리 재귀 스캔 (Generator )
         if not self.cfg.input_dir.exists():
             raise FileNotFoundError(f"경로 없음: {self.cfg.input_dir}")
             
@@ -82,16 +82,19 @@ class DocumentETL:
         logger.info(f"ETL 파이프라인 로드 완료 (Workers: {self.cfg.max_workers})")
 
     def _build_engine(self) -> DocumentConverter:
-        # OCR 및 레이아웃 분석 엔진 초기화
+        # 초기화
         ocr_opts = EasyOcrOptions(lang=["ko", "en"])
         pdf_opts = PdfPipelineOptions()
         pdf_opts.do_ocr = True
         pdf_opts.ocr_options = ocr_opts
         pdf_opts.do_table_structure = True
         
+        # 옵션 명시적 매핑 (Dictionary)
         return DocumentConverter(
             allowed_formats=self.cfg.allowed_formats,
-            pipeline_options=pdf_opts
+            format_options={
+                InputFormat.PDF: PdfFormatOption(pipeline_options=pdf_opts)
+            }
         )
 
     def _process_single(self, fpath: Path) -> Optional[Path]:
