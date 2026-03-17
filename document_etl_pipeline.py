@@ -5,6 +5,7 @@ Description:
     - 하이브리드 문서(PDF, DOCX, PPTX, XLSX)의 구조적 추출 및 마크다운 변환
     - 재귀적 디렉토리 스캔 및 계층 구조 보존 적재
     - 다국어(KO, EN) OCR 및 시각적 레이아웃 분석 지원
+    - Memory & VRAM 최적화 적용 (Thread Pool & Worker Limit)
 Author: H4RU
 Date: 2026-03-17
 """
@@ -16,7 +17,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import List, Set, Optional, Iterator
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 
 from docling.document_converter import DocumentConverter, PdfFormatOption
@@ -43,7 +44,8 @@ class ETLConfig:
     # 파이프라인 불변 설정
     input_dir: Path
     output_dir: Path
-    max_workers: int = field(default_factory=lambda: os.cpu_count() or 4)
+    # VRAM/RAM OOM 방지
+    max_workers: int = 4 
     target_exts: Set[str] = field(default_factory=lambda: {'.pdf', '.docx', '.pptx', '.xlsx'})
     skip_exts: Set[str] = field(default_factory=lambda: {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'})
     allowed_formats: List[InputFormat] = field(
@@ -138,7 +140,7 @@ class DocumentETL:
         size_mb = fpath.stat().st_size / (1024 * 1024)
 
         try:
-            print(f"지금 읽고 있는 파일: {fpath.name}")
+            logger.debug(f"처리 시작: {fpath.name}")
             res = self.converter.convert(fpath)
             md_text = res.document.export_to_markdown()
             
@@ -156,7 +158,7 @@ class DocumentETL:
             return out_path
             
         except Exception as e:
-            # 에러 발생 시 Traceback 전체 출력
+            # 에러 Traceback 전체 출력
             logger.error(f"Parse failed [{fpath.name}]: {e}\n{traceback.format_exc()}")
             return None
 
@@ -170,8 +172,8 @@ class DocumentETL:
         start_t = time.time()
         success_cnt = 0
 
-        # CPU 바운드 병렬 처리
-        with ProcessPoolExecutor(max_workers=self.cfg.max_workers) as pool:
+        # ProcessPool -> ThreadPool
+        with ThreadPoolExecutor(max_workers=self.cfg.max_workers) as pool:
             futures = {pool.submit(self._process_single, f): f for f in targets}
             for fut in tqdm(as_completed(futures), total=len(targets), desc="ETL Progress"):
                 if fut.result():
