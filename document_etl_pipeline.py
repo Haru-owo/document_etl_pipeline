@@ -23,6 +23,8 @@ from docling.document_converter import DocumentConverter, PdfFormatOption
 from docling.datamodel.pipeline_options import PdfPipelineOptions, EasyOcrOptions
 from docling.datamodel.base_models import InputFormat
 
+import traceback
+
 # 전역 로거 세팅
 logger = logging.getLogger("RAG_ETL")
 logger.setLevel(logging.INFO)
@@ -119,7 +121,8 @@ class DocumentETL:
             return out_path
             
         except Exception as e:
-            logger.error(f"파싱 실패 [{fpath.name}]: {e}")
+            # 에러 발생 시 Traceback 전체 출력
+            logger.error(f"Parse failed [{fpath.name}]: {e}\n{traceback.format_exc()}")
             return None
 
     def execute(self) -> None:
