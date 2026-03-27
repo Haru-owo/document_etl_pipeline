@@ -1,47 +1,63 @@
-# High-Performance Document ETL Pipeline for RAG
+# Data RAG System: Document ETL Pipeline
 
-대규모 비정형 데이터(PDF, DOCX, PPTX, XLSX)를 분석하여 LLM 기반 RAG(Retrieval-Augmented Generation) 시스템 구축에 최적화된 마크다운(Markdown)으로 변환하는 전처리 파이프라인입니다.
+RAG(Retrieval-Augmented Generation) 시스템 구축을 위한 하이브리드 문서 데이터 추출 및 마크다운 변환 파이프라인. 
+다양한 문서 포맷을 재귀적으로 스캔하고, 다국어 OCR 및 레이아웃 분석을 적용하여 원본 디렉터리 계층 구조를 보존한 상태로 마크다운을 적재함. 대용량 병렬 처리에 따른 OOM(Out-Of-Memory) 방지 아키텍처가 적용됨.
 
-## Key Features
+## 주요 기능 (Key Features)
 
-- **하이브리드 문서 엔진**: `docling`을 활용하여 PDF뿐만 아니라 오피스 계열 문서의 계층 구조를 보존하며 추출합니다.
-- **다국어 OCR & 레이아웃 분석**: EasyOCR 기반 ko/en 인식 및 시각적 레이아웃 분석을 통한 정확한 표(Table) 구조 복원.
-- **자동 전처리(Preprocessing)**: 파이프라인 시작 시 ZIP 아카이브를 탐색하고 자동으로 압축을 해제하여 데이터 유실을 방지합니다.
-- **이어하기(Resume) 기능**: 기변환된 결과물(`.md`)을 감지하여 중단된 지점부터 다시 시작하는 멱등성(Idempotency)을 보장합니다.
-- **지능형 스캐너**: OS 레벨의 임시 파일(`~$`) 및 숨김 파일(`.`)을 자동으로 필터링하여 에러 발생 가능성을 사전에 차단합니다.
+* **하이브리드 포맷 지원**: PDF, DOCX, PPTX, XLSX 문서를 구조화된 Markdown으로 변환.
+* **아카이브 자동 전처리**: `input_dir` 내 `.zip` 파일을 탐지하고 동일한 이름의 디렉터리로 자동 압축 해제 (`ArchivePreprocessor`).
+* **고도화된 OCR 및 구조 분석**: 
+  * `docling` 엔진 활용.
+  * EasyOCR 기반 다국어(KO, EN) 인식 지원.
+  * 문서 내 표(Table) 구조 시각적 분석 및 마크다운 테이블 변환 (`do_table_structure=True`).
+* **메모리 및 VRAM 최적화**:
+  * `multiprocessing.Pool`을 통한 병렬 파싱 (기본 4 Workers).
+  * **지연 로딩(Lazy Loading)**: 메인 프로세스가 아닌 개별 Worker 단위로 무거운 변환 엔진을 로드하여 초기 메모리 스파이크 차단.
+  * **메모리 누수 차단**: `maxtasksperchild=50` 설정을 통해 각 Worker가 50개 파일 처리 후 자동 종료/재생성되며 메모리를 OS에 반환.
+* **무결성 및 장애 격리 (Fault Tolerance)**:
+  * 이미 변환된 파일은 스킵 (이어하기 지원).
+  * OS 임시 파일(`~$`) 및 숨김 파일(`.`) 자동 필터링.
+  * 개별 파일 변환 실패 시 전체 파이프라인 중단 없이 Traceback 로깅 후 다음 파일 진행.
 
-## Optimization & Architecture
+## 🛠 시스템 요구사항 (Prerequisites)
 
-고스펙 하드웨어(VRAM 96GB / RAM 64GB)의 성능을 극대화하고 파이썬의 자원 관리 한계를 극복하기 위해 설계된 아키텍처입니다.
+* Python 3.8+
+* `docling`
+* `tqdm`
+* `multiprocessing`, `zipfile` (Python Built-in)
 
-| 항목 | 기술적 상세 내용 | 기대 효과 |
-| :--- | :--- | :--- |
-| **Concurrency** | `multiprocessing.Pool` 기반 병렬 처리 | 파이썬 GIL을 우회하여 CPU 멀티코어 성능 100% 활용 |
-| **Memory Protection** | `maxtasksperchild=50` 적용 | 누적된 힙(Heap) 메모리를 OS 레벨에서 강제 회수하여 Memory Leak 방지 |
-| **Worker Throttling** | `max_workers=4` 최적화 설정 | 64GB RAM 환경에서 프로세스당 약 15GB 가용 버퍼 확보로 OOM 예방 |
-| **Lazy Loading** | 워커별 독립 엔진 초기화 | GPU CUDA Context 충돌 방지 및 메인 프로세스 점유율 최소화 |
+## 📂 디렉터리 구조 (Directory Structure)
 
-## Directory Structure
+* `input_dir` (`./자료`): 원본 문서 및 압축 파일 위치. 하위 디렉터리를 포함하여 재귀적으로 탐색됨.
+* `output_dir` (`./processed_md`): 변환된 마크다운 파일 출력 위치. `input_dir`의 디렉터리 뎁스(Depth)를 그대로 보존하여 적재됨.
 
-```text
-.
-├── document_etl_pipeline.py  # 메인 파이프라인 엔진
-├── 자료/                     # Raw 데이터 입력 디렉토리
-├── processed_md/             # 변환 완료된 마크다운 결과물
-└── README.md
+## 사용법 (Usage)
+
+**1. 패키지 설치**
+```bash
+pip install -r requirements.txt
 ```
 
-## Usage
+**2. 환경 설정 및 실행**
+코드 하단의 `ETLConfig`에서 입출력 경로와 병렬 처리 수준을 시스템에 맞게 조정 후 스크립트를 실행함.
 
-1. **환경 구성**: Python 3.12+ 가상환경 구축 및 `docling`, `torch`, `tqdm` 등 종속성 설치.
-2. **데이터 배치**: `자료/` 폴더 하위에 변환 대상 파일들을 위치시킵니다.
-3. **실행**:
-   ```bash
-   python document_etl_pipeline.py
-   ```
+```python
+# 파이프라인 설정 예시
+cfg = ETLConfig(
+    input_dir=Path("./자료"),
+    output_dir=Path("./processed_md"),
+    max_workers=4 # 시스템 코어 수 및 VRAM 용량에 맞춰 조절
+)
+```
 
-## Troubleshooting Reference
+```bash
+python etl_pipeline.py
+```
 
-- **BrokenProcessPool**: 특정 고해상도 문서 처리 시 발생하는 메모리 스파이크를 `maxtasksperchild` 로직으로 프로세스를 주기적 재생성하여 해결.
-- **System OOM (64GB RAM)**: 무분별한 워커 확장이 아닌, 시스템 자원 프로파일링을 통한 최적 워커(4ea) 선정을 통해 해결.
-- **Encoding Exception**: 비표준 인코딩 바이트(`invalid continuation byte`) 데이터 유입 시 예외 처리를 적용하여 파이프라인 전체 안정성 유지.
+## 로깅 및 모니터링
+* `tqdm`을 통한 실시간 진행률(Progress Bar) 출력.
+* 콘솔 로거(`[RAG_ETL]`)를 통해 개별 파일의 파싱 소요 시간 및 처리 속도(`mb/s`) 출력.
+
+
+이 파이프라인을 바로 배포할 수 있도록 `requirements.txt`나 `Dockerfile`을 추가로 작성해 드릴까요?
